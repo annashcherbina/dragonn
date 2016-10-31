@@ -2,9 +2,8 @@ from __future__ import absolute_import, division, print_function
 import numpy as np, random
 np.random.seed(1)
 random.seed(1)
-from dragonn.hyperparameter_search import RandomSearch
 from dragonn.models import SequenceDNN
-from dragonn.simulations import simulate_single_motif_detection
+from simdna.simulations import simulate_single_motif_detection
 from dragonn.utils import one_hot_encode, get_motif_scores, reverse_complement
 from sklearn.cross_validation import train_test_split
 
@@ -64,11 +63,12 @@ if not do_hyperparameter_search:
     if use_RNN:
         hyperparameters.update({'GRU_size': 35, 'TDD_size': 45})
     model = SequenceDNN(**hyperparameters)
-    model.train(X_train, y_train, validation_data=(X_valid, y_valid))
+    model.train(X_train, y_train, validation_data=(X_valid, y_valid),
+                save_best_model_to_prefix='best_model')
 
 else:
     print('Starting hyperparameter search...')
-    from dragonn.hyperparameter_search import HyperparameterSearcher
+    from dragonn.hyperparameter_search import HyperparameterSearcher, RandomSearch
     fixed_hyperparameters = {'seq_length': seq_length, 'use_RNN': use_RNN, 'num_epochs': num_epochs}
     grid = {'num_filters': ((5, 100),), 'pool_width': (5, 40),
             'conv_width': ((6, 20),), 'dropout': (0, 0.5)}
