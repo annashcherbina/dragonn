@@ -3,13 +3,9 @@ import json, matplotlib, numpy as np, os, subprocess, tempfile
 matplotlib.use('pdf')
 import matplotlib.pyplot as plt
 from abc import abstractmethod, ABCMeta
-from deeplift import keras_conversion as kc
-from deeplift.blobs import MxtsMode
 from dragonn.metrics import ClassificationResult
-from dragonn.plot import plot_bases_on_ax
-from dragonn.visualize_util import plot as plot_keras_model
 from keras.models import Sequential
-from keras.callbacks import Callback, EarlyStopping
+from keras.callbacks import EarlyStopping
 from keras.layers.core import (
     Activation, Dense, Dropout, Flatten,
     Permute, Reshape, TimeDistributedDense
@@ -50,9 +46,11 @@ class SequenceDNN(Model):
 
     Parameters
     ----------
-    seq_length : int
+    seq_length : int, optional
         length of input sequence.
-    num_tasks : int,
+    keras_model : instance of keras.models.Sequential, optional
+        seq_length or keras_model must be specified.
+    num_tasks : int, optional
         number of tasks. Default: 1.
     num_filters : list[int] | tuple[int]
         number of convolutional filters in each layer. Default: (15,).
@@ -64,8 +62,6 @@ class SequenceDNN(Model):
         strength of L1 penalty.
     dropout : float
         dropout probability in every convolutional layer. Default: 0.
-    num_tasks : int
-        Number of prediction tasks or labels. Default: 1.
     verbose: int
         Verbosity level during training. Valida values: 0, 1, 2.
 
@@ -74,91 +70,94 @@ class SequenceDNN(Model):
     Compiled DNN model.
     """
 
-    class PrintMetrics(Callback):
-
-        def __init__(self, validation_data, sequence_DNN):
-            self.X_valid, self.y_valid = validation_data
-            self.sequence_DNN = sequence_DNN
-
-        def on_epoch_end(self, epoch, logs={}):
-            print('Epoch {}: validation loss: {:.3f}\n{}\n'.format(
-                epoch,
-                logs['val_loss'],
-                self.sequence_DNN.test(self.X_valid, self.y_valid)))
-
-    class LossHistory(Callback):
-
-        def __init__(self, X_train, y_train, validation_data, sequence_DNN):
-            self.X_train = X_train
-            self.y_train = y_train
-            self.X_valid, self.y_valid = validation_data
-            self.sequence_DNN = sequence_DNN
-            self.train_losses = []
-            self.valid_losses = []
-
-        def on_epoch_end(self, epoch, logs={}):
-            self.train_losses.append(self.sequence_DNN.model.evaluate(
-                self.X_train, self.y_train, verbose=False))
-            self.valid_losses.append(self.sequence_DNN.model.evaluate(
-                self.X_valid, self.y_valid, verbose=False))
-
-    def __init__(self, seq_length, use_RNN=False,
-                 num_tasks=1, num_filters=(15,), conv_width=(15,),
+    def __init__(self, seq_length=None, keras_model=None,
+                 use_RNN=False, num_tasks=1,
+                 num_filters=(15, 15, 15), conv_width=(15, 15, 15),
                  pool_width=35, GRU_size=35, TDD_size=15,
                  L1=0, dropout=0.0, num_epochs=100, verbose=1):
-        self.saved_params = locals()
-        self.seq_length = seq_length
-        self.input_shape = (1, 4, self.seq_length)
         self.num_tasks = num_tasks
         self.num_epochs = num_epochs
         self.verbose = verbose
-        self.model = Sequential()
-        assert len(num_filters) == len(conv_width)
-        for nb_filter, nb_col in zip(num_filters, conv_width):
-            self.model.add(Convolution2D(
-                nb_filter=nb_filter, nb_row=4,
-                nb_col=nb_col, activation='linear',
-                init='he_normal', input_shape=self.input_shape,
-                W_regularizer=l1(L1), b_regularizer=l1(L1)))
-            self.model.add(Activation('relu'))
-            self.model.add(Dropout(dropout))
-        self.model.add(MaxPooling2D(pool_size=(1, pool_width)))
-        if use_RNN:
-            num_max_pool_outputs = self.model.layers[-1].output_shape[-1]
-            self.model.add(Reshape((num_filters[-1], num_max_pool_outputs)))
-            self.model.add(Permute((2, 1)))
-            self.model.add(GRU(GRU_size, return_sequences=True))
-            self.model.add(TimeDistributedDense(TDD_size, activation='relu'))
-        self.model.add(Flatten())
-        self.model.add(Dense(output_dim=self.num_tasks))
-        self.model.add(Activation('sigmoid'))
-        self.model.compile(optimizer='adam', loss='binary_crossentropy')
-        self.train_losses = None
-        self.valid_losses = None
+        self.train_metrics = []
+        self.valid_metrics = []
+        if keras_model is not None and seq_length is None:
+            self.model = keras_model
+            self.num_tasks = keras_model.layers[-1].output_shape[-1]
+        elif seq_length is not None and keras_model is None:
+            self.model = Sequential()
+            assert len(num_filters) == len(conv_width)
+            for i, (nb_filter, nb_col) in enumerate(zip(num_filters, conv_width)):
+                conv_height = 4 if i == 0 else 1
+                self.model.add(Convolution2D(
+                    nb_filter=nb_filter, nb_row=conv_height,
+                    nb_col=nb_col, activation='linear',
+                    init='he_normal', input_shape=(1, 4, seq_length),
+                    W_regularizer=l1(L1), b_regularizer=l1(L1)))
+                self.model.add(Activation('relu'))
+                self.model.add(Dropout(dropout))
+            self.model.add(MaxPooling2D(pool_size=(1, pool_width)))
+            if use_RNN:
+                num_max_pool_outputs = self.model.layers[-1].output_shape[-1]
+                self.model.add(Reshape((num_filters[-1], num_max_pool_outputs)))
+                self.model.add(Permute((2, 1)))
+                self.model.add(GRU(GRU_size, return_sequences=True))
+                self.model.add(TimeDistributedDense(TDD_size, activation='relu'))
+            self.model.add(Flatten())
+            self.model.add(Dense(output_dim=self.num_tasks))
+            self.model.add(Activation('sigmoid'))
+            self.model.compile(optimizer='adam', loss='binary_crossentropy')
+        else:
+            raise ValueError("Exactly one of seq_length or keras_model must be specified!")
 
-    def train(self, X, y, validation_data):
+    def train(self, X, y, validation_data, early_stopping_metric='Loss',
+              early_stopping_patience=5, save_best_model_to_prefix=None):
         if y.dtype != bool:
-            assert len(np.unique(y)) == 2
+            assert set(np.unique(y)) == {0, 1}
             y = y.astype(bool)
         multitask = y.shape[1] > 1
         if not multitask:
             num_positives = y.sum()
             num_sequences = len(y)
             num_negatives = num_sequences - num_positives
-        self.callbacks = [EarlyStopping(monitor='val_loss', patience=5)]
         if self.verbose >= 1:
-            self.callbacks.append(self.PrintMetrics(validation_data, self))
-            print('Training model...')
-        self.callbacks.append(self.LossHistory(X, y, validation_data, self))
-        self.model.fit(
-            X, y, batch_size=128, nb_epoch=self.num_epochs,
-            validation_data=validation_data,
-            class_weight={True: num_sequences / num_positives,
-                          False: num_sequences / num_negatives}
-            if not multitask else None,
-            callbacks=self.callbacks, verbose=self.verbose >= 2)
-        self.train_losses = self.callbacks[-1].train_losses
-        self.valid_losses = self.callbacks[-1].valid_losses
+            print('Training model (* indicates new best result)...')
+        X_valid, y_valid = validation_data
+        early_stopping_wait = 0
+        best_metric = np.inf if early_stopping_metric == 'Loss' else -np.inf
+        for epoch in range(1, self.num_epochs + 1):
+            self.model.fit(X, y, batch_size=128, nb_epoch=1,
+                           class_weight={True: num_sequences / num_positives,
+                                         False: num_sequences / num_negatives}
+                           if not multitask else None, verbose=self.verbose >= 2)
+            epoch_train_metrics = self.test(X, y)
+            epoch_valid_metrics = self.test(X_valid, y_valid)
+            self.train_metrics.append(epoch_train_metrics)
+            self.valid_metrics.append(epoch_valid_metrics)
+            if self.verbose >= 1:
+                print('Epoch {}:'.format(epoch))
+                print('Train {}'.format(epoch_train_metrics))
+                print('Valid {}'.format(epoch_valid_metrics), end='')
+            current_metric = epoch_valid_metrics[early_stopping_metric].mean()
+            if (early_stopping_metric == 'Loss') == (current_metric <= best_metric):
+                if self.verbose >= 1:
+                    print(' *')
+                best_metric = current_metric
+                best_epoch = epoch
+                early_stopping_wait = 0
+                if save_best_model_to_prefix is not None:
+                    self.save(save_best_model_to_prefix)
+            else:
+                if self.verbose >= 1:
+                    print()
+                if early_stopping_wait >= early_stopping_patience:
+                    break
+                early_stopping_wait += 1
+        if self.verbose >= 1:
+            print('Finished training after {} epochs.'.format(epoch))
+            if save_best_model_to_prefix is not None:
+                print("The best model's architecture and weights (from epoch {0}) "
+                      'were saved to {1}.arch.json and {1}.weights.h5'.format(
+                    best_epoch, save_best_model_to_prefix))
 
     def predict(self, X):
         return self.model.predict(X, batch_size=128, verbose=False)
@@ -167,18 +166,20 @@ class SequenceDNN(Model):
         """
         Returns 3D array of 2D sequence filters.
         """
-        return self.model.layers[0].get_weights()[0]
+        return self.model.layers[0].get_weights()[0].squeeze(axis=1)
 
     def deeplift(self, X, batch_size=200):
         """
         Returns (num_task, num_samples, 1, num_bases, sequence_length) deeplift score array.
         """
         assert len(np.shape(X)) == 4 and np.shape(X)[1] == 1
+        from deeplift.conversion import keras_conversion as kc
+        from deeplift.blobs import NonlinearMxtsMode,DenseMxtsMode
         # normalize sequence convolution weights
-        kc.mean_normalise_first_conv_layer_weights(self.model, None)
+        kc.mean_normalise_first_conv_layer_weights(self.model, True,None)
         # run deeplift
         deeplift_model = kc.convert_sequential_model(
-            self.model, mxts_mode=MxtsMode.DeepLIFT)
+            self.model, nonlinear_mxts_mode=NonlinearMxtsMode.DeepLIFT)
         target_contribs_func = deeplift_model.get_target_contribs_func(
             find_scores_layer_idx=0)
         return np.asarray([
@@ -218,6 +219,7 @@ class SequenceDNN(Model):
 
     @staticmethod
     def _plot_scores(X, output_directory, peak_width, score_func, score_name):
+        from dragonn.plot import plot_bases_on_ax
         scores = score_func(X).squeeze(axis=2)  # (num_task, num_samples, num_bases, sequence_length)
         try:
             os.makedirs(output_directory)
@@ -263,19 +265,22 @@ class SequenceDNN(Model):
                           score_func=self.in_silico_mutagenesis, score_name='ISM')
 
     def plot_architecture(self, output_file):
+        from dragonn.visualize_util import plot as plot_keras_model
         plot_keras_model(self.model, output_file, show_shape=True)
 
-    def save(self, model_fname, weights_fname):
-        if 'self' in self.saved_params:
-            del self.saved_params['self']
-        json.dump(self.saved_params, open(model_fname, 'wb'), indent=4)
+    def save(self, save_best_model_to_prefix):
+        arch_fname = save_best_model_to_prefix + '.arch.json'
+        weights_fname = save_best_model_to_prefix + '.weights.h5'
+        open(arch_fname, 'w').write(self.model.to_json())
         self.model.save_weights(weights_fname, overwrite=True)
 
     @staticmethod
-    def load(model_fname, weights_fname):
-        model_params = json.load(open(model_fname, 'rb'))
-        sequence_dnn = SequenceDNN(**model_params)
-        sequence_dnn.model.load_weights(weights_fname)
+    def load(arch_fname, weights_fname=None):
+        from keras.models import model_from_json
+        model_json_string = open(arch_fname).read()
+        sequence_dnn = SequenceDNN(keras_model=model_from_json(model_json_string))
+        if weights_fname is not None:
+            sequence_dnn.model.load_weights(weights_fname)
         return sequence_dnn
 
 class MotifScoreRNN(Model):

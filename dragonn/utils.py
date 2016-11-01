@@ -3,7 +3,7 @@ import numpy as np
 import sys
 from sklearn.preprocessing import LabelEncoder, OneHotEncoder
 from scipy.signal import correlate2d
-from dragonn.simulations import loaded_motifs
+from simdna.simulations import loaded_motifs
 
 
 def get_motif_scores(encoded_sequences, motif_names,
@@ -21,7 +21,7 @@ def get_motif_scores(encoded_sequences, motif_names,
 
     Returns
     -------
-    (num_samples, seq_length, num_motifs) complete score array by default.
+    (num_samples, num_motifs, seq_length) complete score array by default.
     If max_scores, (num_samples, num_motifs*max_scores) max score array.
     If max_scores and return_positions, (num_samples, 2*num_motifs*max_scores)
     array with max scores and their positions.
@@ -72,7 +72,7 @@ def one_hot_encode(sequences):
     integer_array = LabelEncoder().fit(np.array(('ACGTN',)).view(integer_type)).transform(
         sequences.view(integer_type)).reshape(len(sequences), sequence_length)
     one_hot_encoding = OneHotEncoder(
-        sparse=False, n_values=5).fit_transform(integer_array)
+        sparse=False, n_values=5, dtype=integer_type).fit_transform(integer_array)
 
     return one_hot_encoding.reshape(
         len(sequences), 1, sequence_length, 5).swapaxes(2, 3)[:, :, [0, 1, 2, 4], :]

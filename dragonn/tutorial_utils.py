@@ -10,7 +10,7 @@ np.random.seed(1)
 from sklearn.cross_validation import train_test_split
 import theano
 
-import dragonn.simulations
+from simdna import simulations
 from dragonn.utils import get_motif_scores, one_hot_encode
 from dragonn.models import SequenceDNN
 from dragonn.plot import add_letters_to_axis, plot_motif
@@ -20,7 +20,7 @@ Data = namedtuple('Data', ['X_train', 'X_valid', 'X_test',
                            'motif_names'])
 
 def get_available_simulations():
-    return [function_name for function_name in dir(dragonn.simulations)
+    return [function_name for function_name in dir(simulations)
             if "simulate" in function_name]
 
 
@@ -31,7 +31,7 @@ def print_available_simulations():
 
 def get_simulation_function(simulation_name):
     if simulation_name in get_available_simulations():
-        return getattr(dragonn.simulations, simulation_name)
+        return getattr(simulations, simulation_name)
     else:
         print("%s is not available. Available simulations are:" % (simulation_name))
         print_available_simulations()
@@ -91,12 +91,14 @@ def train_SequenceDNN(dnn, simulation_data):
 
 
 def SequenceDNN_learning_curve(dnn):
-    if dnn.valid_losses is not None:
-        min_loss_indx = min(enumerate(dnn.valid_losses), key=lambda x: x[1])[0]
+    if dnn.valid_metrics is not None:
+        train_losses, valid_losses = [np.array([epoch_metrics['Loss'] for epoch_metrics in metrics])
+                                      for metrics in (dnn.train_metrics, dnn.valid_metrics)]
+        min_loss_indx = min(enumerate(valid_losses), key=lambda x: x[1])[0]
         f = plt.figure(figsize=(10, 4))
         ax = f.add_subplot(1, 1, 1)
-        ax.plot(range(len(dnn.train_losses)), dnn.train_losses, 'b', label='Training',lw=4)
-        ax.plot(range(len(dnn.train_losses)), dnn.valid_losses, 'r', label='Validation', lw=4)
+        ax.plot(range(len(train_losses)), train_losses, 'b', label='Training',lw=4)
+        ax.plot(range(len(train_losses)), valid_losses, 'r', label='Validation', lw=4)
         ax.plot([min_loss_indx, min_loss_indx], [0, 1.0], 'k--', label='Early Stop')
         ax.legend(loc="upper right")
         ax.set_ylabel("Loss")
@@ -185,21 +187,16 @@ def plot_SequenceDNN_layer_outputs(dnn, simulation_data):
         ax2.axvspan(conv_output_start, conv_output_stop, color='grey', alpha=0.5)
 
 
-def interpret_SequenceDNN_distributed(dnn, simulation_data, plot_layer_outputs=False):
+def interpret_SequenceDNN_filters(dnn, simulation_data):
     print("Plotting simulation motifs...")
     plot_motifs(simulation_data)
     plt.show()
     print("Visualizing convolutional sequence filters in SequenceDNN...")
     plot_sequence_filters(dnn)
     plt.show()
-    if plot_layer_outputs:
-        print("%s %s" % ("Plotting outputs of convolutional and max pooling layer",
-                         "for a positive simulation example..."))
-        plot_SequenceDNN_layer_outputs(dnn, simulation_data)
-        plt.show()
 
 
-def interpret_SequenceDNN_integrative(dnn, simulation_data):
+def interpret_data_with_SequenceDNN(dnn, simulation_data):
     # get a positive and a negative example from the simulation data
     pos_indx = np.where(simulation_data.y_valid==1)[0][0]
     pos_X = simulation_data.X_valid[pos_indx:(pos_indx+1)]
@@ -228,7 +225,7 @@ def interpret_SequenceDNN_integrative(dnn, simulation_data):
         motif_label_dict['ISM Scores'] = ['_'.join(simulation_data.motif_names)]
     motif_label_dict['DeepLIFT Scores'] = motif_label_dict['ISM Scores']
     # plot scores and highlight motif site locations
-    seq_length = dnn.seq_length
+    seq_length = pos_X.shape[-1]
     plots_per_row = 2
     plots_per_column = 3
     ylim_dict = {'Motif Scores': (-80, 30), 'ISM Scores': (-1.5, 3.0), 'DeepLIFT Scores': (-1.5, 3.0)}
@@ -277,19 +274,21 @@ def interpret_SequenceDNN_integrative(dnn, simulation_data):
                 if score_type=='Motif Scores':
                     scores_to_plot = scores[0, _i, :]
                 else:
-                    scores_to_plot = scores.squeeze(axis=2)
+                    scores_to_plot = scores[0, 0, 0, :]
                 if motif_label not in motif_labels_cache:
                     motif_labels_cache.append(motif_label)
                     add_legend = True
                 motif_color = motif_colors[motif_labels_cache.index(motif_label)]
                 ax.plot(scores_to_plot, label=motif_label, c=motif_color)
-                if add_legend:
-                    leg = ax.legend(loc=[0,0.85], frameon=False, fontsize=font_size,
-                                    ncol=3, handlelength=-0.5)
-                    for legobj in leg.legendHandles:
-                        legobj.set_color('w')
-                    for _i, text in enumerate(leg.get_texts()):
-                        text.set_color(motif_color)
+            if add_legend:
+                leg = ax.legend(loc=[0,0.85], frameon=False, fontsize=font_size,
+                                ncol=3, handlelength=-0.5)
+                for legobj in leg.legendHandles:
+                    legobj.set_color('w')
+                for _j, text in enumerate(leg.get_texts()):
+                    text_color = motif_colors[
+                        motif_labels_cache.index(motif_label_dict[score_type][_j])]
+                    text.set_color(text_color)
             for motif_site in motif_sites[key]:
                 ax.axvspan(motif_site - highlight_width, motif_site + highlight_width,
                            color='grey', alpha=0.1)
